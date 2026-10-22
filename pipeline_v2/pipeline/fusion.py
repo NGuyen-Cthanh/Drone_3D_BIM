@@ -37,6 +37,7 @@ class FusionState:
         self.best_epoch = np.full(n_elem, -1, dtype=np.int32)
         self.best_score = np.zeros(n_elem)
         self.n_epochs = 0
+        self.locked = np.zeros(n_elem, dtype=bool)   # cau kien GIA DINH da xay (khong dua tren quan sat)
 
     def update(self, epoch, vis, r, v_min=0.25, r_present=0.5, r_absent=0.1, v_conflict=0.5):
         """
@@ -66,8 +67,17 @@ class FusionState:
         better = (score > self.best_score) & (r > 0)
         self.best_score[better] = score[better]
         self.best_epoch[better] = epoch
+        self.status[self.locked] = PRESENT
         self.n_epochs = max(self.n_epochs, epoch + 1)
         return int((self.status != before).sum())
+
+    def lock_present(self, mask):
+        """
+        Gia dinh cac cau kien trong 'mask' DA XAY (vd cac tang duoi, khong co du lieu thuc te). Chung luon la PRESENT,
+        khong bi quan sat ghi de, va nen duoc loai khoi so lieu danh gia (xem run_fusion_demo --assume-up-to).
+        """
+        self.locked |= np.asarray(mask, dtype=bool)
+        self.status[self.locked] = PRESENT
 
     def counts(self):
         return {NAMES[s]: int((self.status == s).sum()) for s in (UNKNOWN, ABSENT, PRESENT, CONFLICT)}

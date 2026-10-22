@@ -121,3 +121,30 @@ def compare_with_schedule(status, floors, planned_floor_of_date, min_frac=0.8):
         "n_ahead": int(ahead.sum()),
         "delayed_idx": np.where(delayed)[0],
     }
+
+def compare_with_plan(is_built, expected, sched_floors, scheduled=None, unknown=None):
+    """
+    So ket qua do duoc voi KE HOACH tai ngay bao cao (thay cho compare_with_schedule khi da co lich that).
+      is_built  : bool/cau kien - ket luan 'da xay' (vd status == BUILT, hoac PRESENT|CONFLICT tu fusion)
+      expected  : bool/cau kien - schedule_loader.expected_built_mask(...) tai ngay bao cao
+      sched_floors : chi so tang theo NHAN (schedule_loader.element_schedule_floor)
+      scheduled : bool/cau kien - cau kien co thuoc task nao trong lich; cau kien ngoai lich bi loai khoi so sanh
+      unknown   : bool/cau kien - drone KHONG kiem chung duoc (bi che, fusion.UNKNOWN). Khong bao la tre: day la
+                  'chua kiem chung', khong phai 'chua xay'. Drone chi thay mat ngoai nen nhom nay thuong rat lon.
+    Tra ve dict: tre (ke hoach da xong, da nhin du ro ma KHONG thay), chua_kiem_chung (ke hoach da xong nhung bi che),
+                 vuot (thay roi ma ke hoach chua toi), theo tang.
+    """
+    ok = np.ones(len(is_built), dtype=bool) if scheduled is None else np.asarray(scheduled, dtype=bool)
+    exp, blt = np.asarray(expected) & ok, np.asarray(is_built) & ok
+    unk = np.zeros(len(exp), dtype=bool) if unknown is None else np.asarray(unknown, dtype=bool)
+    delayed, ahead = exp & ~blt & ~unk, blt & ~np.asarray(expected)
+    unverified = exp & ~blt & unk
+    by = {}
+    for f in np.unique(sched_floors[ok]):
+        m = (sched_floors == f) & ok
+        by[int(f)] = {"n": int(m.sum()), "expected": int(exp[m].sum()), "built": int(blt[m].sum()),
+                      "delayed": int(delayed[m].sum()), "unverified": int(unverified[m].sum()), "ahead": int(ahead[m & blt].sum())}
+    return {"n_in_schedule": int(ok.sum()), "n_expected": int(exp.sum()), "n_built": int(blt.sum()),
+            "n_delayed": int(delayed.sum()), "n_unverified": int(unverified.sum()), "n_ahead": int(ahead.sum()),
+            "pct_of_plan_confirmed": round(100 * (exp & blt).sum() / max(exp.sum(), 1), 1),
+            "delayed_idx": np.where(delayed)[0], "by_floor": by}

@@ -18,6 +18,13 @@ VAN DE NGAY THANG
   thanh phan dau > 12 thi tu dong chuyen sang ngay/thang/nam. Truong hop toan ngay <= 12 thi mac dinh
   thang/ngay/nam - hay kiem tra lai bang mat.
 
+FILE LICH THAT CUA NHOM (PALC Q9) - cau truc da thay
+  Ten task la MA viet tat, khong co chu 'TANG':   CV2F, DS2F, ..., CV14F, DS14F, CVRF, DSRF  (theo tang)
+                                                  Z1-M, Z1-DS, Z1-CV, Z1-S1, Z2-..., Z5.1-..., CKN  (theo phan khu / mong)
+  Cot 'Attached' chi ghi 'Explicit Selection' => cau kien gan cho task nam trong NWD, KHONG co trong CSV.
+  Quy tac mac dinh (xem ROLE_RULES): CV<n>F = cot-vach tang n; DS<n>F = dam-san tang n; CVRF/DSRF = mai.
+  Cac ma con lai (Z*-*, CKN...) KHONG tu nhan dang duoc -> in ra de bao cao; co the gan tay bang --map (JSON).
+
 GAN TANG
   Ten task / ten tap chon (cot Attached) chua 'TANG 10', 'TANG HAM', 'TUM', 'MAI', 'VIA HE'... (khong dau, khong
   phan biet hoa/thuong) duoc nhan dang, roi doi sang chi so tang (theo cao do san that, giong mesh_utils).
@@ -62,6 +69,37 @@ def floor_key(text):
     if re.search(r"VIA\s*HE|COTE\s*0", n):
         return ("VIAHE",)
     return None
+
+
+# QUY UOC GAN TANG CHO FILE LICH PALC Q9  (tang truc = chi so tang theo NHAN IFC, xem storey_floor_map)
+#   DA XAC NHAN trong Navisworks (tang tret = tang 1):
+#     CV<n>F : cot-vach nhan "TANG n", NAM TREN san tang n (CV3F tren san 3; CV2F tren DS2F; CV1F tren nen tang tret).
+#              Khop IFC: cot nhan TANG 3 co chan z~8.85 m (san T3 = 8.81 m), dinh z~12.15 m.
+#     DS<n>F : dam-san CHINH LA san tang n (DS3F = san tang 3, DS2F = san tang 2) => DS_SHIFT = 0.
+#   DA KIEM CHUNG BANG NAVISWORKS: chon DS3F -> sang 'TANG 3- KC' > Floors va Structural Framing (133 cau kien = 100 dam
+#          + 31 san nhan TANG 3 + 2 dam 200x300 gan nhan sai 'TANG 1' nhung nam o tang hinh hoc 2) => DS_SHIFT = 0.
+#          Chon CV3F -> sang 'TANG 3- KC' > Structural Columns.
+#   CVRF   : cot mai -> nhan TUM (nhan MAI trong IFC khong co cot nao; 126 cot nam o TUM).  DSRF -> nhan MAI.
+#   Tang 1: khong co DS1F; tang 1 duoc ghep tu cac task Z*-S1 (CHUA chac chan) -> dung map_s1.json (--map).
+DS_SHIFT = 0
+
+ROLE_RULES = [  # (regex tren ten task viet hoa, vai tro, ham(m, key_to_floor, ds_shift) -> chi so tang | None)
+    (r"CV(\d+)F", "CV", lambda m, k, sh: k.get(("T", int(m.group(1))))),
+    (r"DS(\d+)F", "DS", lambda m, k, sh: (None if ("T", int(m.group(1))) not in k else k[("T", int(m.group(1)))] + sh)),
+    (r"CVRF", "CV", lambda m, k, sh: k.get(("TUM",))),
+    (r"DSRF", "DS", lambda m, k, sh: k.get(("MAI",))),
+]
+
+
+def parse_key(text):
+    """'T-2' -> ('T', 2); 'MAI' -> ('MAI',)  (dung cho file --map)."""
+    p = str(text).upper().split("-")
+    return (p[0], int(p[1])) if len(p) == 2 and p[1].isdigit() else (p[0],)
+
+
+def load_overrides(path):
+    """JSON {ten_task: {"floor": chi_so_tang | "T-2" | "MAI", "role": "CV"|"DS"|"ALL"}}"""
+    return json.load(open(path, encoding="utf-8")) if path else {}
 
 
 def _read_rows(path):
@@ -185,27 +223,55 @@ def label_floors(E, floors, key_to_floor, max_dev=2):
     return out
 
 
-def floor_schedule(tasks, key_to_floor):
+def _classify_task(t, key_to_floor, overrides, ds_shift=DS_SHIFT):
+    """-> (chi so tang | None, vai tro, ly_do_bo_qua)."""
+    name = (t["name"] or "").strip()
+    if name in overrides:
+        o = overrides[name]
+        f = o["floor"] if isinstance(o["floor"], int) else key_to_floor.get(parse_key(o["floor"]))
+        return f, o.get("role", "ALL"), (None if f is not None else "tang trong --map khong co trong IFC")
+    up = name.upper().replace(" ", "")
+    if re.fullmatch(r"Z\d(\.\d)?-(M|DS|CV|S1|DHP|VHP)|CKN", up):
+        # Da kiem tra trong Navisworks (Auto Select Attached Items): cac task nay gan voi COC, DAI COC, san day / tang ham,
+        # tuc la phan mong - ham. PLM.ifc hien tai KHONG co nhung cau kien nay (IFC bat dau tu z = 0.8 m, khong co TANG HAM).
+        return None, "ALL", "mong/ham/san day (coc, dai coc...): khong co trong PLM.ifc hien tai"
+    for pat, role, fk in ROLE_RULES:
+        m = re.fullmatch(pat, up)
+        if m:
+            f = fk(m, key_to_floor, ds_shift)
+            if f is not None and not (0 <= f <= max(key_to_floor.values())):
+                f = None
+            return f, role, (None if f is not None else f"tang tuong ung ({up}, DS_SHIFT={ds_shift}) khong co trong IFC")
+    key = floor_key(name) or floor_key(t["attached"])
+    if key is None:
+        return None, "ALL", "khong nhan dang duoc tang"
+    return key_to_floor.get(key), "ALL", (None if key in key_to_floor else f"tang {key} khong co trong IFC")
+
+
+def floor_schedule(tasks, key_to_floor, overrides=None, ds_shift=DS_SHIFT):
     """
-    Gop task theo tang: {floor: {planned_start, planned_end, actual_start, actual_end, n_tasks}}.
-    planned_start = som nhat, planned_end = muon nhat cua cac task thuoc tang do.
-    Tra ve (table, bo_qua) - bo_qua = ten task khong nhan dang duoc tang / tang khong co trong IFC.
+    Gop task theo tang: {floor: {planned_start, planned_end, actual_start, actual_end, n_tasks,
+                                 roles: {'CV'|'DS'|'ALL': {'start','end'}}}}.
+    CV = cot-vach, DS = dam-san (neu lich phan biet). planned_start = som nhat, planned_end = muon nhat.
+    Tra ve (table, bo_qua) - bo_qua = list (ten task, ly do).
     """
+    overrides = overrides or {}
     table, skipped = {}, []
     for t in tasks:
-        key = floor_key(t["name"]) or floor_key(t["attached"])
-        if key is None or t["planned_end"] is None:
-            skipped.append(t["name"]); continue
-        if key not in key_to_floor:
-            skipped.append(f'{t["name"]} (tang {key} khong co trong IFC)'); continue
-        f = key_to_floor[key]
+        if not (t["name"] or "").strip():
+            continue                                              # dong trong
+        f, role, why = _classify_task(t, key_to_floor, overrides, ds_shift)
+        if f is None or t["planned_end"] is None:
+            skipped.append((t["name"], why or "thieu ngay ke hoach")); continue
         r = table.setdefault(f, {"planned_start": None, "planned_end": None, "actual_start": None,
-                                 "actual_end": None, "n_tasks": 0})
+                                 "actual_end": None, "n_tasks": 0, "roles": {}})
         r["n_tasks"] += 1
         for k, fn in (("planned_start", min), ("planned_end", max), ("actual_start", min), ("actual_end", max)):
             v = t[k]
             if v is not None:
                 r[k] = v if r[k] is None else fn(r[k], v)
+        rr = r["roles"].setdefault(role, {"start": t["planned_start"], "end": t["planned_end"]})
+        rr["start"] = min(rr["start"], t["planned_start"]); rr["end"] = max(rr["end"], t["planned_end"])
     return table, skipped
 
 
@@ -235,8 +301,8 @@ def element_schedule_floor(E, floors, key_to_floor, mode="label", mismatch=2):
       mode="label"   : = tang theo NHAN IFC (Revit gan COT theo cao do CHAN cot, nen cot nam duoi san n+1 co
                        nhan 'TANG n'). Dung khi tap chon trong NWD duoc tao theo nhan tang (vd 'X1-X15 : TANG 10- KC').
                        Dam/san co nhan lech >= 'mismatch' tang so voi cao do that (gan nhan sai) -> giu tang hinh hoc.
-    Mac dinh 'label' vi ten tap chon trong NWD cua nhom theo nhan tang; hay KIEM TRA bang cach mo mo phong
-    TimeLiner o giua 1 task va xem cot nao duoc to mau.
+    MAC DINH 'label'. DA KIEM CHUNG (Navisworks, task CV3F): cot cua CV3F nam TREN san tang 3 => 'label'.
+    'geometry' gan cot lech 1 tang so voi lich nay; chi giu lai de doi chieu.
     """
     out = np.array(floors, copy=True)
     if mode == "geometry":
@@ -251,20 +317,39 @@ def element_schedule_floor(E, floors, key_to_floor, mode="label", mismatch=2):
     return out
 
 
-def expected_built_mask(types, floors, table, date, in_progress="columns"):
+def unscheduled_elements(types, sched_floors, table):
+    """Cau kien khong thuoc task nao cua lich (vai tro CV/DS cua tang do khong co task). Tra ve mask bool."""
+    col = types == "IfcColumn"
+    m = np.zeros(len(types), dtype=bool)
+    for f in np.unique(sched_floors):
+        roles = table.get(int(f), {}).get("roles", {})
+        sel = sched_floors == f
+        has_cv, has_ds = "CV" in roles or "ALL" in roles, "DS" in roles or "ALL" in roles
+        m |= sel & ((col if not has_cv else False) | (~col if not has_ds else False))
+    return m
+
+
+def expected_built_mask(types, floors, table, date):
     """
-    Cau kien 'ke hoach cho rang da xay' tai ngay date: moi cau kien cua tang 'xong'.
-    Tang 'dang_thi_cong': in_progress="columns" -> chi tinh COT (cot do truoc dam/san, giong built_mask
-    trong simulate_asbuilt); "none" -> khong tinh gi (an toan hon khi chua biet thu tu thi cong trong 1 task).
-    'floors' o day phai la chi so tang THEO LICH (xem element_schedule_floor).
+    Cau kien 'ke hoach cho rang da xay' tai ngay date.
+      - Lich co phan biet CV (cot-vach) / DS (dam-san): cot xay xong khi qua ngay ket thuc CV cua tang do;
+        dam + san xay xong khi qua ngay ket thuc DS.
+      - Lich khong phan biet (vai tro ALL): tang 'xong' -> moi cau kien; 'dang thi cong' -> chi COT.
     """
     st = floor_state(table, date)
     m = np.zeros(len(floors), dtype=bool)
-    for f, s in st.items():
-        if s == "xong":
+    col, bs = types == "IfcColumn", types != "IfcColumn"
+    for f, r in table.items():
+        roles = r["roles"]
+        if "CV" in roles or "DS" in roles:
+            if "CV" in roles and roles["CV"]["end"] <= date:
+                m |= (floors == f) & col
+            if "DS" in roles and roles["DS"]["end"] <= date:
+                m |= (floors == f) & bs
+        elif st[f] == "xong":
             m |= floors == f
-        elif s == "dang_thi_cong" and in_progress == "columns":
-            m |= (floors == f) & (types == "IfcColumn")
+        elif st[f] == "dang_thi_cong":
+            m |= (floors == f) & col
     return m
 
 
@@ -278,6 +363,9 @@ if __name__ == "__main__":
     ap.add_argument("csv")
     ap.add_argument("--data", default=str(config.DATA_DIR))
     ap.add_argument("--date", default=None, help="ngay bao cao (YYYY-MM-DD), mac dinh hom nay")
+    ap.add_argument("--ds-shift", type=int, default=DS_SHIFT, help="DS<n>F = dam-san nhan TANG n+shift (xem DS_SHIFT)")
+    ap.add_argument("--map", default=None, help="JSON gan tay task -> tang/vai tro (xem docstring)")
+    ap.add_argument("--write-template", default=None, help="ghi danh sach task chua gan ra file JSON de dien")
     a = ap.parse_args()
 
     E, V, F, fe = load_bim(Path(a.data) / "plm_elements.json", Path(a.data) / "plm_meshes.npz")
@@ -285,13 +373,22 @@ if __name__ == "__main__":
     km = storey_floor_map(E, levels)
     print("Tang IFC -> chi so tang:", {("-".join(map(str, k))): v for k, v in sorted(km.items(), key=lambda kv: kv[1])})
     tasks, style = read_timeliner_csv(a.csv)
-    print(f"Doc {len(tasks)} task, kieu ngay: {style}")
-    table, skipped = floor_schedule(tasks, km)
-    print("\n tang  Z(m)   bat dau KH   ket thuc KH   so task")
+    named = [t for t in tasks if (t["name"] or "").strip()]
+    print(f"Doc {len(named)} task co ten (bo {len(tasks)-len(named)} dong trong), kieu ngay: {style}")
+    table, skipped = floor_schedule(tasks, km, load_overrides(a.map), a.ds_shift)
+    fmt = lambda r: f"{r['start']:%m-%d}..{r['end']:%m-%d}" if r else "-"
+    print("\n tang  Z(m)   cot-vach (CV)      dam-san (DS)       KH bat dau   KH ket thuc  #task")
     for f in sorted(table):
-        r = table[f]
-        print(f" {f:3d} {levels[f]:6.2f}   {r['planned_start']:%Y-%m-%d}   {r['planned_end']:%Y-%m-%d}   {r['n_tasks']}")
+        r = table[f]; ro = r["roles"]
+        print(f" {f:3d} {levels[f]:6.2f}   {fmt(ro.get('CV')):17s}  {fmt(ro.get('DS')):17s}  "
+              f"{r['planned_start']:%Y-%m-%d}   {r['planned_end']:%Y-%m-%d}   {r['n_tasks']}")
     if skipped:
-        print(f"\nBo qua {len(skipped)} task (khong nhan dang duoc tang), vi du: {skipped[:5]}")
+        print(f"\nChua gan duoc {len(skipped)} task (ly do ben canh):")
+        for n, why in skipped:
+            print(f"   {n:14s} {why}")
+        if a.write_template:
+            json.dump({n: {"floor": None, "role": "ALL"} for n, _ in skipped},
+                      open(a.write_template, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+            print(f"-> Da ghi mau {a.write_template}: dien 'floor' (chi so tang hoac 'T-2'/'MAI') va 'role' (CV/DS/ALL) roi chay lai voi --map")
     d = datetime.strptime(a.date, "%Y-%m-%d") if a.date else datetime.now()
     print(f"\nTai {d:%Y-%m-%d}: tang cao nhat KH da xong = {planned_top_floor(table, d)}")

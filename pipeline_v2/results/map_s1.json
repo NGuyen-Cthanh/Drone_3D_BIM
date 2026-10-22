@@ -1,0 +1,30 @@
+{
+ "Z1-S1": {
+  "floor": "T-1",
+  "role": "DS"
+ },
+ "Z2-S1": {
+  "floor": "T-1",
+  "role": "DS"
+ },
+ "Z3-S1": {
+  "floor": "T-1",
+  "role": "DS"
+ },
+ "Z4-S1": {
+  "floor": "T-1",
+  "role": "DS"
+ },
+ "Z5.1-S1": {
+  "floor": "T-1",
+  "role": "DS"
+ },
+ "Z5.2-S1": {
+  "floor": "T-1",
+  "role": "DS"
+ },
+ "Z5.3-S1": {
+  "floor": "T-1",
+  "role": "DS"
+ }
+}
